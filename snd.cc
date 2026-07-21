@@ -11,6 +11,11 @@
 #include "fft.h"
 #include <portaudio.h>
 #include <ctype.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <errno.h>
 
 void
 snd_init()
@@ -152,6 +157,8 @@ SoundIn::open(std::string card, std::string chan, int rate)
     sin = new CardSoundIn(atoi(card.c_str()), atoi(chan.c_str()), rate);
   } else if(card == "file"){
     sin = new FileSoundIn(chan, rate);
+  } else if(card == "listen"){
+    sin = new NetworkSoundIn(chan, rate);
 #ifdef USE_AIRSPYHF
   } else if(card == "airspy"){
     sin = new AirspySoundIn(chan, rate);
@@ -331,6 +338,375 @@ CardSoundIn::start()
 
   dt_ = now() - Pa_GetStreamTime(str);
 
+}
+
+//
+// NetworkSoundIn: read a streamed WAV file from a TCP connection.
+//
+
+NetworkSoundIn::NetworkSoundIn(std::string chan, int rate)
+{
+  // chan is "address:port". the address may be empty (":1234")
+  // to bind to all interfaces.
+  std::string::size_type colon = chan.rfind(':');
+  if(colon == std::string::npos){
+    fprintf(stderr, "NetworkSoundIn: expected address:port, got %s\n",
+            chan.c_str());
+    exit(1);
+  }
+  addr_ = chan.substr(0, colon);
+  port_ = atoi(chan.substr(colon + 1).c_str());
+  if(port_ <= 0){
+    fprintf(stderr, "NetworkSoundIn: bad port in %s\n", chan.c_str());
+    exit(1);
+  }
+
+  rate_ = rate; // may be overridden by the WAV header
+  channels_ = 1;
+  bits_ = 16;
+  format_ = 1;
+  listen_fd_ = -1;
+  fd_ = -1;
+  time_ = -1;
+  n_ = 0;
+  buf_ = 0;
+  wi_ = 0;
+  ri_ = 0;
+  reader_ = 0;
+}
+
+//
+// read exactly n bytes from the current connection fd_.
+// returns false on EOF or error.
+//
+bool
+NetworkSoundIn::read_exact(void *buf, int n)
+{
+  char *p = (char *) buf;
+  int got = 0;
+  while(got < n){
+    int cc = ::read(fd_, p + got, n - got);
+    if(cc <= 0){
+      return false;
+    }
+    got += cc;
+  }
+  return true;
+}
+
+//
+// parse the WAV header on fd_, filling in rate_, channels_,
+// bits_ and format_. leaves fd_ positioned at the first PCM
+// sample. returns false on a malformed header.
+// the "data" chunk length is ignored, since for a live stream
+// it is usually bogus (0, or a maximum value).
+//
+static unsigned int le32(const unsigned char *p){
+  return p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned)p[3] << 24);
+}
+static unsigned int le16(const unsigned char *p){
+  return p[0] | (p[1] << 8);
+}
+
+bool
+NetworkSoundIn::read_header()
+{
+  unsigned char riff[12];
+  if(!read_exact(riff, 12))
+    return false;
+  if(memcmp(riff, "RIFF", 4) != 0 || memcmp(riff + 8, "WAVE", 4) != 0){
+    fprintf(stderr, "NetworkSoundIn: not a WAV stream (missing RIFF/WAVE)\n");
+    return false;
+  }
+
+  int got_fmt = 0;
+
+  // walk the chunks until we reach "data".
+  while(1){
+    unsigned char ch[8];
+    if(!read_exact(ch, 8))
+      return false;
+    unsigned int sz = le32(ch + 4);
+
+    if(memcmp(ch, "fmt ", 4) == 0){
+      unsigned char fmt[16];
+      if(sz < 16)
+        return false;
+      if(!read_exact(fmt, 16))
+        return false;
+      format_ = le16(fmt + 0);
+      channels_ = le16(fmt + 2);
+      rate_ = le32(fmt + 4);
+      bits_ = le16(fmt + 14);
+      got_fmt = 1;
+      // skip any extra bytes in the fmt chunk.
+      for(unsigned int i = 16; i < sz; i++){
+        char junk;
+        if(!read_exact(&junk, 1))
+          return false;
+      }
+    } else if(memcmp(ch, "data", 4) == 0){
+      if(!got_fmt){
+        fprintf(stderr, "NetworkSoundIn: data chunk before fmt chunk\n");
+        return false;
+      }
+      break; // fd_ now points at the PCM samples.
+    } else {
+      // skip an uninteresting chunk (e.g. LIST, fact).
+      for(unsigned int i = 0; i < sz; i++){
+        char junk;
+        if(!read_exact(&junk, 1))
+          return false;
+      }
+    }
+  }
+
+  if(channels_ < 1 || rate_ < 1){
+    fprintf(stderr, "NetworkSoundIn: bad WAV parameters (rate=%d chan=%d)\n",
+            rate_, channels_);
+    return false;
+  }
+  if(!((format_ == 1 && (bits_ == 8 || bits_ == 16 || bits_ == 24 || bits_ == 32)) ||
+       (format_ == 3 && bits_ == 32))){
+    fprintf(stderr, "NetworkSoundIn: unsupported WAV format=%d bits=%d\n",
+            format_, bits_);
+    return false;
+  }
+
+  fprintf(stderr, "NetworkSoundIn: WAV stream rate=%d channels=%d bits=%d format=%d\n",
+          rate_, channels_, bits_, format_);
+  return true;
+}
+
+//
+// create the listening server socket and start listening.
+//
+void
+NetworkSoundIn::setup_listen()
+{
+  listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+  if(listen_fd_ < 0){
+    fprintf(stderr, "NetworkSoundIn: socket() failed: %s\n", strerror(errno));
+    exit(1);
+  }
+
+  int one = 1;
+  setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+  struct sockaddr_in sin;
+  memset(&sin, 0, sizeof(sin));
+  sin.sin_family = AF_INET;
+  sin.sin_port = htons(port_);
+  if(addr_.size() == 0 || addr_ == "*" || addr_ == "0.0.0.0"){
+    sin.sin_addr.s_addr = htonl(INADDR_ANY);
+  } else if(inet_pton(AF_INET, addr_.c_str(), &sin.sin_addr) != 1){
+    fprintf(stderr, "NetworkSoundIn: bad address %s\n", addr_.c_str());
+    exit(1);
+  }
+
+  if(bind(listen_fd_, (struct sockaddr *) &sin, sizeof(sin)) < 0){
+    fprintf(stderr, "NetworkSoundIn: bind(%s:%d) failed: %s\n",
+            addr_.c_str(), port_, strerror(errno));
+    exit(1);
+  }
+
+  if(listen(listen_fd_, 1) < 0){
+    fprintf(stderr, "NetworkSoundIn: listen() failed: %s\n", strerror(errno));
+    exit(1);
+  }
+
+  fprintf(stderr, "NetworkSoundIn: listening on %s:%d\n",
+          addr_.size() ? addr_.c_str() : "0.0.0.0", port_);
+}
+
+//
+// accept one connection and read its WAV header.
+// retries until it gets a connection with a valid header.
+//
+bool
+NetworkSoundIn::accept_and_header()
+{
+  while(1){
+    struct sockaddr_in peer;
+    socklen_t plen = sizeof(peer);
+    int c = accept(listen_fd_, (struct sockaddr *) &peer, &plen);
+    if(c < 0){
+      if(errno == EINTR)
+        continue;
+      fprintf(stderr, "NetworkSoundIn: accept() failed: %s\n", strerror(errno));
+      return false;
+    }
+
+    // low latency for streamed audio.
+    int one = 1;
+    setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+    fd_ = c;
+    fprintf(stderr, "NetworkSoundIn: accepted connection from %s:%d\n",
+            inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
+
+    if(read_header()){
+      return true;
+    }
+
+    // bad header; drop this client and wait for another.
+    ::close(fd_);
+    fd_ = -1;
+  }
+}
+
+//
+// convert one frame's channel-0 sample to a double in [-1, 1].
+//
+static double
+net_sample(const unsigned char *p, int format, int bits)
+{
+  if(format == 3 && bits == 32){
+    float f;
+    memcpy(&f, p, 4);
+    return f;
+  } else if(bits == 8){
+    // 8-bit WAV PCM is unsigned, centred at 128.
+    return (((int) p[0]) - 128) / 128.0;
+  } else if(bits == 16){
+    short s = (short) (p[0] | (p[1] << 8));
+    return s / 32768.0;
+  } else if(bits == 24){
+    int v = p[0] | (p[1] << 8) | (p[2] << 16);
+    if(v & 0x800000)
+      v |= ~0xffffff; // sign-extend
+    return v / 8388608.0;
+  } else if(bits == 32){
+    int v = p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned) p[3] << 24);
+    return v / 2147483648.0;
+  }
+  return 0;
+}
+
+//
+// background thread: read PCM from the connection and append to
+// the circular buffer. re-accepts a new connection if the current
+// one closes, so ft8mon keeps running as a persistent server.
+//
+void
+NetworkSoundIn::reader_loop()
+{
+  int frame_bytes = channels_ * (bits_ / 8);
+  std::vector<unsigned char> acc; // leftover partial-frame bytes
+
+  while(1){
+    unsigned char tmp[8192];
+    int cc = ::read(fd_, tmp, sizeof(tmp));
+    if(cc <= 0){
+      // connection closed; wait for the next client.
+      fprintf(stderr, "NetworkSoundIn: connection closed, waiting for a new one\n");
+      ::close(fd_);
+      fd_ = -1;
+      acc.clear();
+      int saved_rate = rate_, saved_ch = channels_, saved_bits = bits_;
+      if(!accept_and_header()){
+        return;
+      }
+      if(rate_ != saved_rate || channels_ != saved_ch || bits_ != saved_bits){
+        fprintf(stderr, "NetworkSoundIn: new stream format differs from the first; "
+                "keeping original rate=%d channels=%d bits=%d\n",
+                saved_rate, saved_ch, saved_bits);
+        rate_ = saved_rate;
+        channels_ = saved_ch;
+        bits_ = saved_bits;
+        frame_bytes = channels_ * (bits_ / 8);
+      }
+      continue;
+    }
+
+    acc.insert(acc.end(), tmp, tmp + cc);
+
+    int nframes = acc.size() / frame_bytes;
+    for(int f = 0; f < nframes; f++){
+      // channel 0 is the first sample in the frame.
+      double s = net_sample(&acc[f * frame_bytes], format_, bits_);
+      if(((wi_ + 1) % n_) != ri_){
+        buf_[wi_] = s;
+        wi_ = (wi_ + 1) % n_;
+      } else {
+        // buffer full: drop the oldest sample to keep the newest.
+        ri_ = (ri_ + 1) % n_;
+        buf_[wi_] = s;
+        wi_ = (wi_ + 1) % n_;
+      }
+    }
+    // UNIX time of the most recent sample we just stored.
+    time_ = now();
+
+    if(nframes > 0){
+      acc.erase(acc.begin(), acc.begin() + nframes * frame_bytes);
+    }
+  }
+}
+
+void
+NetworkSoundIn::start()
+{
+  setup_listen();
+
+  // block until the first client connects and sends a valid header,
+  // so that rate() returns the real sample rate to the main loop.
+  if(!accept_and_header()){
+    fprintf(stderr, "NetworkSoundIn: could not accept a connection\n");
+    exit(1);
+  }
+
+  // allocate a 30-second circular buffer.
+  n_ = rate_ * 30;
+  buf_ = (double *) malloc(sizeof(double) * n_);
+  assert(buf_);
+  wi_ = 0;
+  ri_ = 0;
+
+  reader_ = new std::thread( [this]() { this->reader_loop(); } );
+}
+
+//
+// read a bunch of recent sound samples. same semantics as
+// CardSoundIn::get(): return up to n samples, or fewer if that
+// is all that is buffered; if latest==1, discard all but the
+// most recent n samples. t0 is the UNIX time of the first
+// returned sample.
+//
+std::vector<double>
+NetworkSoundIn::get(int n, double &t0, int latest)
+{
+  std::vector<double> v;
+
+  if(time_ < 0 && wi_ == ri_){
+    // no input has ever arrived.
+    t0 = -1;
+    return v;
+  }
+
+  if(latest){
+    while(((wi_ + n_ - ri_) % n_) > n){
+      ri_ = (ri_ + 1) % n_;
+    }
+  }
+
+  // UNIX time of the first sample in buf_ (buf_[ri_]).
+  t0 = time_; // time of most recent sample, buf_[wi_-1].
+  if(wi_ > ri_){
+    t0 -= (wi_ - ri_) * (1.0 / rate_);
+  } else {
+    t0 -= ((wi_ + n_) - ri_) * (1.0 / rate_);
+  }
+
+  while((int) v.size() < n){
+    if(ri_ == wi_){
+      break;
+    }
+    v.push_back(buf_[ri_]);
+    ri_ = (ri_ + 1) % n_;
+  }
+
+  return v;
 }
 
 //

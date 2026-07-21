@@ -79,7 +79,75 @@ usage()
   fprintf(stderr, "       ft8mon -levels card channel\n");
   fprintf(stderr, "       ft8mon -list\n");
   fprintf(stderr, "       ft8mon -file xxx.wav ...\n");
+  fprintf(stderr, "       ft8mon -listen address:port\n");
   exit(1);
+}
+
+//
+// decode FT8 from a live SoundIn source, once per 15-second cycle.
+// used for both a local sound card and a streamed WAV source.
+//
+void
+decode_loop(SoundIn *sin)
+{
+  int hints[2] = { 2, 0 }; // CQ
+  double budget = 5; // compute for this many seconds per cycle
+
+  sin->start();
+  int rate = sin->rate();
+
+  while(1){
+    // sleep until 14 seconds into the next 15-second cycle.
+    double tt = now();
+    long long cycle_start = tt - ((long long)tt % 15);
+
+    if(tt - cycle_start >= 14){
+      double ttt_start;
+      // asking for no more than 15 seconds of samples in order
+      // to avoid missing in fftw plan cache.
+      // the "1" asks for the most recent 15 seconds of samples,
+      // not the oldest buffered. it causes samples before the
+      // most recent 15 seconds to be discarded.
+      std::vector<double> samples = sin->get(15 * rate, ttt_start, 1);
+
+      // ttt_start is UNIX time of samples[0].
+      double ttt_end = ttt_start + samples.size() / rate;
+      cycle_start = ((long long) (ttt_end / 15)) * 15;
+
+      // sample # of 0.5 seconds into the 15-second cycle.
+      long long nominal_start = samples.size() - rate * (ttt_end - cycle_start - 0.5);
+
+      if(nominal_start >= 0 && nominal_start + 10*rate < (int) samples.size()){
+        struct tm result;
+        time_t tx = cycle_start;
+        gmtime_r(&tx, &result);
+        printf("%02d:%02d:%02d decodes: %d\n",
+               result.tm_hour,
+               result.tm_min,
+               result.tm_sec,
+               cycle_count);
+
+        // make samples exactly 15 seconds, to make
+        // fftw plan caching more effective.
+        samples.resize(15 * rate, 0.0);
+
+        cycle_mu.lock();
+        cycle_count = 0;
+        saved_cycle_start = cycle_start; // for hcb() callback
+        cycle_already.clear();
+        cycle_mu.unlock();
+
+        entry(samples.data(), samples.size(), nominal_start, rate,
+              150,
+              3600, // 2900,
+              hints, hints, budget, budget, hcb,
+              0, (struct cdecode *) 0);
+      }
+
+      sleep(2);
+    }
+    usleep(100 * 1000); // 0.1 seconds
+  }
 }
 
 int
@@ -97,61 +165,12 @@ main(int argc, char *argv[])
   if(argc == 4 && strcmp(argv[1], "-card") == 0){
     int wanted_rate = 12000;
     SoundIn *sin = SoundIn::open(argv[2], argv[3], wanted_rate);
-    sin->start();
-    int rate = sin->rate();
-
-    while(1){
-      // sleep until 14 seconds into the next 15-second cycle.
-      double tt = now();
-      long long cycle_start = tt - ((long long)tt % 15);
-
-      if(tt - cycle_start >= 14){
-        double ttt_start;
-        // asking for no more than 15 seconds of samples in order
-        // to avoid missing in fftw plan cache.
-        // the "1" asks for the most recent 15 seconds of samples,
-        // not the oldest buffered. it causes samples before the
-        // most recent 15 seconds to be discarded.
-        std::vector<double> samples = sin->get(15 * rate, ttt_start, 1);
-
-        // ttt_start is UNIX time of samples[0].
-        double ttt_end = ttt_start + samples.size() / rate;
-        cycle_start = ((long long) (ttt_end / 15)) * 15;
-
-        // sample # of 0.5 seconds into the 15-second cycle.
-        long long nominal_start = samples.size() - rate * (ttt_end - cycle_start - 0.5);
-
-        if(nominal_start >= 0 && nominal_start + 10*rate < (int) samples.size()){
-          struct tm result;
-          time_t tx = cycle_start;
-          gmtime_r(&tx, &result);
-          printf("%02d:%02d:%02d decodes: %d\n",
-                 result.tm_hour,
-                 result.tm_min,
-                 result.tm_sec,
-                 cycle_count);
-
-          // make samples exactly 15 seconds, to make
-          // fftw plan caching more effective.
-          samples.resize(15 * rate, 0.0);
-
-          cycle_mu.lock();
-          cycle_count = 0;
-          saved_cycle_start = cycle_start; // for hcb() callback
-          cycle_already.clear();
-          cycle_mu.unlock();
-
-          entry(samples.data(), samples.size(), nominal_start, rate,
-                150,
-                3600, // 2900,
-                hints, hints, budget, budget, hcb,
-                0, (struct cdecode *) 0);
-        }
-
-        sleep(2);
-      }
-      usleep(100 * 1000); // 0.1 seconds
-    }
+    decode_loop(sin);
+  } else if(argc == 3 && strcmp(argv[1], "-listen") == 0){
+    // read a streamed WAV file from a TCP connection.
+    // argv[2] is "address:port"; the WAV header sets the sample rate.
+    SoundIn *sin = SoundIn::open("listen", argv[2], -1);
+    decode_loop(sin);
   } else if(argc == 4 && strcmp(argv[1], "-levels") == 0){
     SoundIn *sin = SoundIn::open(argv[2], argv[3], 12000);
     sin->start();

@@ -41,6 +41,24 @@ To read input from a recorded WAV file:
   ./ft8mon -file xxx.wav
 ```
 
+To read a live WAV stream from a TCP connection, ft8mon can act as a
+server. It creates a listening socket on the given address and port,
+accepts one connection, reads the WAV header to learn the sample rate,
+and then decodes the streamed audio as it arrives:
+
+```
+  ./ft8mon -listen 0.0.0.0:8073
+```
+
+Use an empty address (e.g. `:8073`) to listen on all interfaces. If the
+sender disconnects, ft8mon keeps listening and accepts the next
+connection. Any source that writes a WAV header (8/16/24/32-bit PCM or
+32-bit float) followed by streamed samples will work, for example:
+
+```
+  sox -d -t wav - | nc some-host 8073   # stream the default input
+```
+
 For Airspy HF+ Discovery support, install the airspyhf
 and liquid dsp libraries, and uncomment the relevant lines in the
 Makefile. For RFspace SDR-IP, NetSDR, CloudIQ, and CloudSDR

@@ -9,6 +9,7 @@
 #include <complex>
 #include <string>
 #include <vector>
+#include <thread>
 #include "util.h"
 #ifdef USE_AIRSPYHF
 #include <airspyhf.h>
@@ -106,6 +107,45 @@ public:
         
     return v;
   }
+};
+
+//
+// read a WAV stream from a TCP connection.
+// ft8mon creates a listening server socket, accepts one
+// connection, reads the WAV header to learn the sample rate,
+// and then treats the streamed PCM as a live audio source.
+//
+class NetworkSoundIn : public SoundIn {
+ private:
+  std::string addr_; // bind address, e.g. "0.0.0.0" (empty => any)
+  int port_;
+  int rate_;         // sample rate, from the WAV header
+  int channels_;     // channels in the stream (we use channel 0)
+  int bits_;         // bits per sample
+  int format_;       // WAV format code: 1 = PCM int, 3 = IEEE float
+  int listen_fd_;    // server socket
+  int fd_;           // accepted connection
+  double time_;      // UNIX time of most recent sample, buf_[wi_-1]
+
+  // circular buffer
+  int n_;
+  double *buf_;
+  volatile int wi_;
+  volatile int ri_;
+
+  std::thread *reader_;
+
+  void setup_listen();
+  bool accept_and_header();
+  bool read_exact(void *buf, int n);
+  bool read_header();
+  void reader_loop();
+
+ public:
+  NetworkSoundIn(std::string chan, int rate); // chan = "address:port"
+  void start();
+  std::vector<double> get(int n, double &t0, int latest);
+  int rate() { return rate_; }
 };
 
 #ifdef USE_AIRSPYHF
