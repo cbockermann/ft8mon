@@ -59,6 +59,40 @@ connection. Any source that writes a WAV header (8/16/24/32-bit PCM or
   sox -d -t wav - | nc some-host 8073   # stream the default input
 ```
 
+To feed decodes to another tool, add `-json host:port` to any of the
+commands above. ft8mon then sends each decode as a JSON object in its
+own UDP datagram, in addition to the normal output:
+
+```
+  ./ft8mon -listen :8073 -json 127.0.0.1:9000
+```
+
+Each datagram looks like:
+
+```
+  {"time":"2026-07-21T22:04:30Z","unix":1784671470,"snr":-27,
+   "dt":1.86,"freq":2574.1,"correct_bits":128,"msg":"CQ DX AB1HL FN42"}
+```
+
+UDP is fire-and-forget, so no receiver needs to be running and a
+missed packet just drops one decode. A minimal consumer is
+`nc -ul 9000` or a few lines of Python.
+
+When running several ft8mon instances (e.g. one per band) that all
+send to the same collector, add one or more `-tag key:value` options to
+label each stream. Each tag is added as a `"key":"value"` pair to every
+JSON object:
+
+```
+  ./ft8mon -listen :8073 -json host:9000 -tag band:40m -tag site:home
+```
+
+yields:
+
+```
+  {..., "msg":"CQ DX AB1HL FN42", "band":"40m", "site":"home"}
+```
+
 For Airspy HF+ Discovery support, install the airspyhf
 and liquid dsp libraries, and uncomment the relevant lines in the
 Makefile. For RFspace SDR-IP, NetSDR, CloudIQ, and CloudSDR

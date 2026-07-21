@@ -15,6 +15,9 @@
 #include <map>
 #include <string>
 #include <thread>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <errno.h>
 #include "snd.h"
 #include "util.h"
 #include "unpack.h"
@@ -28,6 +31,110 @@ std::mutex cycle_mu;
 volatile int cycle_count;
 time_t saved_cycle_start;
 std::map<std::string,bool> cycle_already;
+
+//
+// optional: emit each decode as a JSON datagram over UDP,
+// for downstream processing by another tool.
+//
+static int json_fd = -1; // connected UDP socket, or -1 if disabled
+
+//
+// open a connected UDP socket to host:port for JSON output.
+//
+static void
+json_udp_open(const char *hostport)
+{
+  std::string hp(hostport);
+  std::string::size_type colon = hp.rfind(':');
+  if(colon == std::string::npos){
+    fprintf(stderr, "-json: expected host:port, got %s\n", hostport);
+    exit(1);
+  }
+  std::string host = hp.substr(0, colon);
+  std::string port = hp.substr(colon + 1);
+  if(host.size() == 0)
+    host = "127.0.0.1";
+
+  struct addrinfo hints, *res = 0;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_DGRAM;
+  int e = getaddrinfo(host.c_str(), port.c_str(), &hints, &res);
+  if(e != 0 || res == 0){
+    fprintf(stderr, "-json: cannot resolve %s: %s\n", hostport, gai_strerror(e));
+    exit(1);
+  }
+
+  int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+  if(fd < 0){
+    fprintf(stderr, "-json: socket() failed: %s\n", strerror(errno));
+    exit(1);
+  }
+  // connect() a UDP socket just fixes the default destination.
+  if(connect(fd, res->ai_addr, res->ai_addrlen) < 0){
+    fprintf(stderr, "-json: connect(%s) failed: %s\n", hostport, strerror(errno));
+    exit(1);
+  }
+  freeaddrinfo(res);
+
+  json_fd = fd;
+  fprintf(stderr, "-json: sending decodes as JSON to %s\n", hostport);
+}
+
+//
+// escape a string for inclusion in a JSON value.
+//
+static std::string
+json_escape(const std::string &s)
+{
+  std::string o;
+  for(char c : s){
+    switch(c){
+    case '"':  o += "\\\""; break;
+    case '\\': o += "\\\\"; break;
+    case '\n': o += "\\n";  break;
+    case '\r': o += "\\r";  break;
+    case '\t': o += "\\t";  break;
+    default:
+      if((unsigned char) c < 0x20){
+        char b[8];
+        snprintf(b, sizeof(b), "\\u%04x", (unsigned char) c);
+        o += b;
+      } else {
+        o += c;
+      }
+    }
+  }
+  return o;
+}
+
+//
+// optional extra key/value pairs to add to every JSON datagram,
+// e.g. -tag band:40m. pre-formatted as ,"key":"value"... so it can
+// be spliced in just before the closing brace.
+//
+static std::string json_tags;
+
+//
+// parse a "key:value" argument from -tag and append it to json_tags.
+//
+static void
+json_add_tag(const char *kv)
+{
+  std::string s(kv);
+  std::string::size_type colon = s.find(':');
+  if(colon == std::string::npos){
+    fprintf(stderr, "-tag: expected key:value, got %s\n", kv);
+    exit(1);
+  }
+  std::string k = s.substr(0, colon);
+  std::string v = s.substr(colon + 1);
+  if(k.size() == 0){
+    fprintf(stderr, "-tag: empty key in %s\n", kv);
+    exit(1);
+  }
+  json_tags += ",\"" + json_escape(k) + "\":\"" + json_escape(v) + "\"";
+}
 
 //
 // a91 is 91 bits -- 77 plus the 14-bit CRC.
@@ -65,7 +172,26 @@ hcb(int *a91, double hz0, double hz1, double off,
          hz0,
          msg.c_str());
   fflush(stdout);
-  
+
+  if(json_fd >= 0){
+    char ts[40];
+    strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &result);
+    std::string em = json_escape(msg);
+    char buf[512];
+    // the fixed fields; note there is no closing brace yet.
+    snprintf(buf, sizeof(buf),
+             "{\"time\":\"%s\",\"unix\":%lld,\"snr\":%d,\"dt\":%.2f,"
+             "\"freq\":%.1f,\"correct_bits\":%d,\"msg\":\"%s\"",
+             ts, (long long) saved_cycle_start, (int) snr,
+             off - 0.5, hz0, correct_bits, em.c_str());
+    std::string out = buf;
+    out += json_tags; // any -tag key/value pairs, or empty
+    out += "}\n";
+    // one send() == one datagram; atomic, so no lock needed even
+    // though hcb() runs on several decoder threads.
+    send(json_fd, out.data(), out.size(), 0);
+  }
+
   return 2; // 2 => new decode, do subtract.
 }
 
@@ -81,6 +207,8 @@ usage()
   fprintf(stderr, "       ft8mon -file xxx.wav ...\n");
   fprintf(stderr, "       ft8mon -listen address:port          (WAV stream)\n");
   fprintf(stderr, "       ft8mon -listen address:port rate     (raw s16le mono PCM)\n");
+  fprintf(stderr, "  add  -json host:port to also send each decode as JSON over UDP\n");
+  fprintf(stderr, "  add  -tag key:value  to add \"key\":\"value\" to each JSON object (repeatable)\n");
   exit(1);
 }
 
@@ -162,6 +290,25 @@ main(int argc, char *argv[])
 
   extern int nthreads;
   nthreads = 4; // multi-core
+
+  // pull an optional "-json host:port" out of argv, wherever it
+  // appears, so it can be combined with any input source. the
+  // remaining arguments are then dispatched exactly as before.
+  {
+    int w = 1;
+    for(int r = 1; r < argc; ){
+      if(strcmp(argv[r], "-json") == 0 && r + 1 < argc){
+        json_udp_open(argv[r+1]);
+        r += 2;
+      } else if(strcmp(argv[r], "-tag") == 0 && r + 1 < argc){
+        json_add_tag(argv[r+1]);
+        r += 2;
+      } else {
+        argv[w++] = argv[r++];
+      }
+    }
+    argc = w;
+  }
 
   if(argc == 4 && strcmp(argv[1], "-card") == 0){
     int wanted_rate = 12000;
