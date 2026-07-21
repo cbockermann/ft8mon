@@ -79,7 +79,8 @@ usage()
   fprintf(stderr, "       ft8mon -levels card channel\n");
   fprintf(stderr, "       ft8mon -list\n");
   fprintf(stderr, "       ft8mon -file xxx.wav ...\n");
-  fprintf(stderr, "       ft8mon -listen address:port\n");
+  fprintf(stderr, "       ft8mon -listen address:port          (WAV stream)\n");
+  fprintf(stderr, "       ft8mon -listen address:port rate     (raw s16le mono PCM)\n");
   exit(1);
 }
 
@@ -170,6 +171,12 @@ main(int argc, char *argv[])
     // read a streamed WAV file from a TCP connection.
     // argv[2] is "address:port"; the WAV header sets the sample rate.
     SoundIn *sin = SoundIn::open("listen", argv[2], -1);
+    decode_loop(sin);
+  } else if(argc == 4 && strcmp(argv[1], "-listen") == 0){
+    // read a headerless raw signed-16-bit little-endian mono PCM
+    // stream from a TCP connection. argv[2] is "address:port" and
+    // argv[3] is the sample rate (e.g. 12000).
+    SoundIn *sin = SoundIn::open("rawlisten", argv[2], atoi(argv[3]));
     decode_loop(sin);
   } else if(argc == 4 && strcmp(argv[1], "-levels") == 0){
     SoundIn *sin = SoundIn::open(argv[2], argv[3], 12000);

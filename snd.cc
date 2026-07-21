@@ -159,6 +159,8 @@ SoundIn::open(std::string card, std::string chan, int rate)
     sin = new FileSoundIn(chan, rate);
   } else if(card == "listen"){
     sin = new NetworkSoundIn(chan, rate);
+  } else if(card == "rawlisten"){
+    sin = new NetworkSoundIn(chan, rate, true);
 #ifdef USE_AIRSPYHF
   } else if(card == "airspy"){
     sin = new AirspySoundIn(chan, rate);
@@ -344,7 +346,7 @@ CardSoundIn::start()
 // NetworkSoundIn: read a streamed WAV file from a TCP connection.
 //
 
-NetworkSoundIn::NetworkSoundIn(std::string chan, int rate)
+NetworkSoundIn::NetworkSoundIn(std::string chan, int rate, bool raw)
 {
   // chan is "address:port". the address may be empty (":1234")
   // to bind to all interfaces.
@@ -361,7 +363,13 @@ NetworkSoundIn::NetworkSoundIn(std::string chan, int rate)
     exit(1);
   }
 
-  rate_ = rate; // may be overridden by the WAV header
+  raw_ = raw;
+  if(raw_ && rate <= 0){
+    fprintf(stderr, "NetworkSoundIn: raw PCM stream needs a sample rate\n");
+    exit(1);
+  }
+
+  rate_ = rate; // for a WAV stream this is overridden by the header
   channels_ = 1;
   bits_ = 16;
   format_ = 1;
@@ -544,6 +552,13 @@ NetworkSoundIn::accept_and_header()
     fd_ = c;
     fprintf(stderr, "NetworkSoundIn: accepted connection from %s:%d\n",
             inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
+
+    if(raw_){
+      // no header: the caller specified the format.
+      fprintf(stderr, "NetworkSoundIn: raw PCM stream rate=%d channels=%d bits=%d\n",
+              rate_, channels_, bits_);
+      return true;
+    }
 
     if(read_header()){
       return true;

@@ -123,6 +123,7 @@ class NetworkSoundIn : public SoundIn {
   int channels_;     // channels in the stream (we use channel 0)
   int bits_;         // bits per sample
   int format_;       // WAV format code: 1 = PCM int, 3 = IEEE float
+  bool raw_;         // true => headerless raw s16le mono PCM stream
   int listen_fd_;    // server socket
   int fd_;           // accepted connection
   double time_;      // UNIX time of most recent sample, buf_[wi_-1]
@@ -142,7 +143,10 @@ class NetworkSoundIn : public SoundIn {
   void reader_loop();
 
  public:
-  NetworkSoundIn(std::string chan, int rate); // chan = "address:port"
+  // chan = "address:port". if raw is true the stream is headerless
+  // signed-16-bit little-endian mono PCM at the given rate; otherwise
+  // it is a WAV stream and rate is taken from the header.
+  NetworkSoundIn(std::string chan, int rate, bool raw = false);
   void start();
   std::vector<double> get(int n, double &t0, int latest);
   int rate() { return rate_; }
