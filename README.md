@@ -78,6 +78,21 @@ UDP is fire-and-forget, so no receiver needs to be running and a
 missed packet just drops one decode. A minimal consumer is
 `nc -ul 9000` or a few lines of Python.
 
+When running several ft8mon instances (e.g. one per band) that all
+send to the same collector, add one or more `-tag key:value` options to
+label each stream. Each tag is added as a `"key":"value"` pair to every
+JSON object:
+
+```
+  ./ft8mon -listen :8073 -json host:9000 -tag band:40m -tag site:home
+```
+
+yields:
+
+```
+  {..., "msg":"CQ DX AB1HL FN42", "band":"40m", "site":"home"}
+```
+
 For Airspy HF+ Discovery support, install the airspyhf
 and liquid dsp libraries, and uncomment the relevant lines in the
 Makefile. For RFspace SDR-IP, NetSDR, CloudIQ, and CloudSDR

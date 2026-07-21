@@ -109,6 +109,34 @@ json_escape(const std::string &s)
 }
 
 //
+// optional extra key/value pairs to add to every JSON datagram,
+// e.g. -tag band:40m. pre-formatted as ,"key":"value"... so it can
+// be spliced in just before the closing brace.
+//
+static std::string json_tags;
+
+//
+// parse a "key:value" argument from -tag and append it to json_tags.
+//
+static void
+json_add_tag(const char *kv)
+{
+  std::string s(kv);
+  std::string::size_type colon = s.find(':');
+  if(colon == std::string::npos){
+    fprintf(stderr, "-tag: expected key:value, got %s\n", kv);
+    exit(1);
+  }
+  std::string k = s.substr(0, colon);
+  std::string v = s.substr(colon + 1);
+  if(k.size() == 0){
+    fprintf(stderr, "-tag: empty key in %s\n", kv);
+    exit(1);
+  }
+  json_tags += ",\"" + json_escape(k) + "\":\"" + json_escape(v) + "\"";
+}
+
+//
 // a91 is 91 bits -- 77 plus the 14-bit CRC.
 //
 int
@@ -149,17 +177,19 @@ hcb(int *a91, double hz0, double hz1, double off,
     char ts[40];
     strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &result);
     std::string em = json_escape(msg);
-    char buf[600];
-    int n = snprintf(buf, sizeof(buf),
-                     "{\"time\":\"%s\",\"unix\":%lld,\"snr\":%d,\"dt\":%.2f,"
-                     "\"freq\":%.1f,\"correct_bits\":%d,\"msg\":\"%s\"}\n",
-                     ts, (long long) saved_cycle_start, (int) snr,
-                     off - 0.5, hz0, correct_bits, em.c_str());
-    if(n > 0){
-      // one send() == one datagram; atomic, so no lock needed even
-      // though hcb() runs on several decoder threads.
-      send(json_fd, buf, n < (int) sizeof(buf) ? n : (int) sizeof(buf) - 1, 0);
-    }
+    char buf[512];
+    // the fixed fields; note there is no closing brace yet.
+    snprintf(buf, sizeof(buf),
+             "{\"time\":\"%s\",\"unix\":%lld,\"snr\":%d,\"dt\":%.2f,"
+             "\"freq\":%.1f,\"correct_bits\":%d,\"msg\":\"%s\"",
+             ts, (long long) saved_cycle_start, (int) snr,
+             off - 0.5, hz0, correct_bits, em.c_str());
+    std::string out = buf;
+    out += json_tags; // any -tag key/value pairs, or empty
+    out += "}\n";
+    // one send() == one datagram; atomic, so no lock needed even
+    // though hcb() runs on several decoder threads.
+    send(json_fd, out.data(), out.size(), 0);
   }
 
   return 2; // 2 => new decode, do subtract.
@@ -178,6 +208,7 @@ usage()
   fprintf(stderr, "       ft8mon -listen address:port          (WAV stream)\n");
   fprintf(stderr, "       ft8mon -listen address:port rate     (raw s16le mono PCM)\n");
   fprintf(stderr, "  add  -json host:port to also send each decode as JSON over UDP\n");
+  fprintf(stderr, "  add  -tag key:value  to add \"key\":\"value\" to each JSON object (repeatable)\n");
   exit(1);
 }
 
@@ -268,6 +299,9 @@ main(int argc, char *argv[])
     for(int r = 1; r < argc; ){
       if(strcmp(argv[r], "-json") == 0 && r + 1 < argc){
         json_udp_open(argv[r+1]);
+        r += 2;
+      } else if(strcmp(argv[r], "-tag") == 0 && r + 1 < argc){
+        json_add_tag(argv[r+1]);
         r += 2;
       } else {
         argv[w++] = argv[r++];
