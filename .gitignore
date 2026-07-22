@@ -1,0 +1,18 @@
+# compiled ft8mon binary (produced by `make`)
+/ft8mon
+
+# C/C++ build artifacts
+*.o
+*.obj
+*.dSYM/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# decode logs written by scripts/udp_json_logger.py
+*.ndjson
+
+# macOS / editor cruft
+.DS_Store
+*~
