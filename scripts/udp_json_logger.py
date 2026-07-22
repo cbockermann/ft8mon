@@ -6,7 +6,7 @@ arrives as one JSON object per UDP datagram, and this script appends it,
 one object per line (newline-delimited JSON), to a file.
 
   ./ft8mon -listen :8073 -json 127.0.0.1:5001
-  ./udp_json_logger.py                 # writes to ft8_decodes.ndjson
+  ./scripts/udp_json_logger.py         # writes to ft8_decodes.ndjson
 """
 
 import argparse
