@@ -25,6 +25,9 @@
 void snd_init();
 void snd_list();
 
+// defined in snd.cc; converts baseband I/Q to upper sideband.
+std::vector<double> iq2usb(const std::vector<std::complex<double>> &a);
+
 class SoundIn {
 public:
   virtual void start() = 0;

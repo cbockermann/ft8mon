@@ -171,6 +171,25 @@ try commands like these:
   ./ft8mon -card sdrip 192.168.3.100,14.074
 ```
 
+### RTL-SDR over TCP (rtl_tcp)
+
+A remote RTL-SDR dongle can be used as a card via `rtl_tcp`, which
+streams the dongle's raw I/Q over TCP. Enable `USE_RTLTCP` in the
+`Makefile` (no extra library is needed — the down-conversion, filtering
+and decimation are done in `rtltcp.cc`). Start `rtl_tcp` on the machine
+with the dongle, then point ft8mon at it:
+
+```
+  rtl_tcp -a 0.0.0.0                        # on the receiver machine
+  ./ft8mon -card rtltcp 192.168.1.50:1234,14.074
+```
+
+The argument is `host[:port],megahertz`; the port defaults to 1234. The
+frequency is the FT8 dial frequency (USB). For HF (below ~24 MHz) ft8mon
+switches the dongle into direct-sampling mode automatically, which needs
+an RTL-SDR wired for HF (direct sampling on the Q branch) or an
+upconverter; VHF/UHF bands use the tuner normally.
+
 ## Credits
 
 Original ft8mon and all of the FT8 decoding: **Robert Morris, AB1HL**.
