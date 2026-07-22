@@ -48,12 +48,20 @@ RTLTCPSoundIn::RTLTCPSoundIn(std::string chan, int rate)
     exit(1);
   }
   std::string hostport = chan.substr(0, comma);
-  double mhz = atof(chan.substr(comma + 1).c_str());
+  std::string rest = chan.substr(comma + 1); // "megahertz[,up:megahertz]"
+  double mhz = atof(rest.c_str());
   if(mhz <= 0){
     fprintf(stderr, "rtltcp: bad frequency in %s\n", chan.c_str());
     exit(1);
   }
   hz_ = (int) llround(mhz * 1000000.0);
+
+  // optional upconverter local oscillator, e.g. ",up:125" (MHz).
+  upconverter_ = 0;
+  std::string::size_type up = rest.find("up:");
+  if(up != std::string::npos){
+    upconverter_ = (int) llround(atof(rest.c_str() + up + 3) * 1000000.0);
+  }
 
   std::string::size_type colon = hostport.rfind(':');
   if(colon == std::string::npos){
@@ -226,18 +234,29 @@ RTLTCPSoundIn::connect_and_configure()
     return false;
   }
 
-  // configure. HF (below ~24 MHz) needs direct sampling (Q branch).
-  send_cmd(0x09, hz_ < 24000000 ? 2 : 0); // set direct sampling
-  send_cmd(0x02, dev_rate_);              // set sample rate
-  send_cmd(0x05, ppm_);                   // set frequency correction
-  send_cmd(0x03, 0);                      // gain mode: 0 = automatic
-  send_cmd(0x01, hz_ - offset_);          // set centre frequency
+  // the tuner actually sees the dial frequency plus the upconverter LO.
+  int tuned = hz_ + upconverter_;
 
-  fprintf(stderr, "rtltcp: connected to %s:%d, dial %.3f MHz, %s, "
-          "dev_rate %d -> audio %d\n",
-          host_.c_str(), port_, hz_ / 1000000.0,
-          hz_ < 24000000 ? "direct sampling" : "tuner",
-          dev_rate_, rate_);
+  // configure. HF (below ~24 MHz) needs direct sampling (Q branch);
+  // with an upconverter the tuned frequency is high, so use the tuner.
+  send_cmd(0x09, tuned < 24000000 ? 2 : 0); // set direct sampling
+  send_cmd(0x02, dev_rate_);                // set sample rate
+  send_cmd(0x05, ppm_);                     // set frequency correction
+  send_cmd(0x03, 0);                        // gain mode: 0 = automatic
+  send_cmd(0x01, tuned - offset_);          // set centre frequency
+
+  if(upconverter_ != 0){
+    fprintf(stderr, "rtltcp: connected to %s:%d, dial %.3f MHz + up %.3f MHz "
+            "= tuned %.3f MHz, dev_rate %d -> audio %d\n",
+            host_.c_str(), port_, hz_ / 1000000.0, upconverter_ / 1000000.0,
+            tuned / 1000000.0, dev_rate_, rate_);
+  } else {
+    fprintf(stderr, "rtltcp: connected to %s:%d, dial %.3f MHz, %s, "
+            "dev_rate %d -> audio %d\n",
+            host_.c_str(), port_, hz_ / 1000000.0,
+            tuned < 24000000 ? "direct sampling" : "tuner",
+            dev_rate_, rate_);
+  }
   return true;
 }
 
@@ -346,8 +365,9 @@ RTLTCPSoundIn::set_freq(int hz)
 {
   hz_ = hz;
   if(fd_ >= 0){
-    send_cmd(0x09, hz_ < 24000000 ? 2 : 0);
-    send_cmd(0x01, hz_ - offset_);
+    int tuned = hz_ + upconverter_;
+    send_cmd(0x09, tuned < 24000000 ? 2 : 0);
+    send_cmd(0x01, tuned - offset_);
   }
   return hz;
 }

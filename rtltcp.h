@@ -6,9 +6,11 @@
 // raw I/Q stream into FT8 audio, so a running rtl_tcp can be used as
 // a "card":
 //
-//   ./ft8mon -card rtltcp host:port,megahertz
+//   ./ft8mon -card rtltcp host:port,megahertz[,up:megahertz]
 //
 // e.g.  ./ft8mon -card rtltcp 192.168.1.50:1234,14.074
+//   with a 125 MHz upconverter:
+//       ./ft8mon -card rtltcp 192.168.1.50:1234,14.074,up:125
 //
 // ft8mon is a plain TCP client here; rtl_tcp does the USB device
 // handling. The DSP (a numerically-controlled oscillator to shift the
@@ -31,6 +33,7 @@ class RTLTCPSoundIn : public SoundIn {
   int rate_;       // audio sample rate, e.g. 12000
   int dev_rate_;   // rtl_tcp sample rate, e.g. 240000 (a multiple of rate_)
   int offset_;     // hardware is tuned offset_ Hz below the dial frequency
+  int upconverter_;// upconverter LO in Hz (0 if none); tuner sees dial + LO
   int ppm_;        // frequency correction
   int fd_;         // TCP connection to rtl_tcp, or -1
   double time_;    // UNIX time of most recent audio sample

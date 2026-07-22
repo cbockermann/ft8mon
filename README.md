@@ -187,8 +187,18 @@ with the dongle, then point ft8mon at it:
 The argument is `host[:port],megahertz`; the port defaults to 1234. The
 frequency is the FT8 dial frequency (USB). For HF (below ~24 MHz) ft8mon
 switches the dongle into direct-sampling mode automatically, which needs
-an RTL-SDR wired for HF (direct sampling on the Q branch) or an
-upconverter; VHF/UHF bands use the tuner normally.
+an RTL-SDR wired for HF (direct sampling on the Q branch); VHF/UHF bands
+use the tuner normally.
+
+If you use an upconverter (e.g. a 125 MHz Ham It Up / SpyVerter),
+append `,up:megahertz` with the upconverter's local-oscillator
+frequency. ft8mon then tunes the dongle to `dial + LO` (so the tuner is
+used instead of direct sampling), while you still give the real dial
+frequency:
+
+```
+  ./ft8mon -card rtltcp 192.168.1.50:1234,14.074,up:125
+```
 
 ## Credits
 
