@@ -174,10 +174,10 @@ try commands like these:
 ### RTL-SDR over TCP (rtl_tcp)
 
 A remote RTL-SDR dongle can be used as a card via `rtl_tcp`, which
-streams the dongle's raw I/Q over TCP. Enable `USE_RTLTCP` in the
-`Makefile` (no extra library is needed — the down-conversion, filtering
-and decimation are done in `rtltcp.cc`). Start `rtl_tcp` on the machine
-with the dongle, then point ft8mon at it:
+streams the dongle's raw I/Q over TCP. This backend is built in by
+default and needs no extra library — the down-conversion, filtering and
+decimation are done in `rtltcp.cc`. Start `rtl_tcp` on the machine with
+the dongle, then point ft8mon at it:
 
 ```
   rtl_tcp -a 0.0.0.0                        # on the receiver machine

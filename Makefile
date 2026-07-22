@@ -24,14 +24,11 @@ MOREH =
 # MOREH += sdrip.h
 # LIBS += -lliquid
 
-# for a remote RTL-SDR reached over TCP via rtl_tcp. no extra library
-# needed; the DSP is done in rtltcp.cc.
-# CXX += -DUSE_RTLTCP
-# MOREC += rtltcp.cc
-# MOREH += rtltcp.h
+# the rtl_tcp backend (remote RTL-SDR over TCP) is built in by default;
+# it needs no extra library (the DSP is done in rtltcp.cc).
 
-ft8mon: ft8.cc ft8mon.cc snd.cc libldpc.c osd.cc unpack.cc util.cc fft.cc cloudsdr.h cloudsdr.cc $(MOREC) $(MOREH)
-	$(CXX) $(FLAGS) ft8mon.cc ft8.cc unpack.cc osd.cc snd.cc util.cc fft.cc libldpc.c cloudsdr.cc $(MOREC) -o ft8mon $(LIBS) -lportaudio -pthread
+ft8mon: ft8.cc ft8mon.cc snd.cc libldpc.c osd.cc unpack.cc util.cc fft.cc cloudsdr.h cloudsdr.cc rtltcp.cc rtltcp.h $(MOREC) $(MOREH)
+	$(CXX) $(FLAGS) ft8mon.cc ft8.cc unpack.cc osd.cc snd.cc util.cc fft.cc libldpc.c cloudsdr.cc rtltcp.cc $(MOREC) -o ft8mon $(LIBS) -lportaudio -pthread
 
 clean:
 	rm -f ft8mon

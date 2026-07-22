@@ -11,9 +11,7 @@
 #include "fft.h"
 #include <portaudio.h>
 #include <ctype.h>
-#ifdef USE_RTLTCP
 #include "rtltcp.h"
-#endif
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -164,10 +162,8 @@ SoundIn::open(std::string card, std::string chan, int rate)
     sin = new NetworkSoundIn(chan, rate);
   } else if(card == "rawlisten"){
     sin = new NetworkSoundIn(chan, rate, true);
-#ifdef USE_RTLTCP
   } else if(card == "rtltcp"){
     sin = new RTLTCPSoundIn(chan, rate);
-#endif
 #ifdef USE_AIRSPYHF
   } else if(card == "airspy"){
     sin = new AirspySoundIn(chan, rate);
