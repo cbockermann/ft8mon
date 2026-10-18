@@ -184,21 +184,37 @@ the dongle, then point ft8mon at it:
   ./ft8mon -card rtltcp 192.168.1.50:1234,14.074
 ```
 
-The argument is `host[:port],megahertz`; the port defaults to 1234. The
-frequency is the FT8 dial frequency (USB). For HF (below ~24 MHz) ft8mon
-switches the dongle into direct-sampling mode automatically, which needs
-an RTL-SDR wired for HF (direct sampling on the Q branch); VHF/UHF bands
-use the tuner normally.
+The argument is `host[:port],megahertz[,option...]`; the port defaults
+to 1234 and `megahertz` is the FT8 dial frequency (USB). Comma-separated
+options may follow the frequency, in any order:
 
-If you use an upconverter (e.g. a 125 MHz Ham It Up / SpyVerter),
-append `,up:megahertz` with the upconverter's local-oscillator
-frequency. ft8mon then tunes the dongle to `dial + LO` (so the tuner is
-used instead of direct sampling), while you still give the real dial
-frequency:
+| option | meaning | default |
+|--------|---------|---------|
+| `up:MHz` | upconverter local-oscillator frequency; the dongle is tuned to `dial + LO` | none |
+| `ds:N` | direct sampling: `0` off, `1` I-branch, `2` Q-branch | auto: `2` below 24 MHz, else `0` |
+| `gain:dB` | fixed tuner gain in dB | automatic gain |
+
+Direct sampling is how a classic RTL-SDR (v3-style) receives HF, so by
+default ft8mon turns it on (Q branch) below 24 MHz. **The RTL-SDR Blog
+v4 is different: it receives HF through its own front end and must *not*
+use direct sampling — pass `ds:0` for it.** VHF/UHF always uses the
+tuner (no direct sampling).
+
+Examples:
 
 ```
-  ./ft8mon -card rtltcp 192.168.1.50:1234,14.074,up:125
+  rtl_tcp -a 0.0.0.0                              # on the receiver machine
+
+  ./ft8mon -card rtltcp 192.168.1.50:1234,14.074          # v3-style HF (auto Q)
+  ./ft8mon -card rtltcp 192.168.1.50:1234,7.074,ds:0      # RTL-SDR Blog v4 on 40 m
+  ./ft8mon -card rtltcp 192.168.1.50:1234,7.074,ds:0,gain:30   # + fixed 30 dB gain
+  ./ft8mon -card rtltcp 192.168.1.50:1234,144.174         # 2 m (tuner, native)
+  ./ft8mon -card rtltcp 192.168.1.50:1234,14.074,up:125   # 125 MHz upconverter
 ```
+
+Because ft8mon knows the dial frequency here, each JSON decode (`-json`)
+is tagged automatically with `dial_hz`, the absolute `rf_hz`
+(dial + audio offset) and a `band` name — no `-tag` needed.
 
 ## Credits
 

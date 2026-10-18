@@ -6,11 +6,17 @@
 // raw I/Q stream into FT8 audio, so a running rtl_tcp can be used as
 // a "card":
 //
-//   ./ft8mon -card rtltcp host:port,megahertz[,up:megahertz]
+//   ./ft8mon -card rtltcp host:port,megahertz[,up:MHz][,ds:N][,gain:dB]
 //
 // e.g.  ./ft8mon -card rtltcp 192.168.1.50:1234,14.074
-//   with a 125 MHz upconverter:
-//       ./ft8mon -card rtltcp 192.168.1.50:1234,14.074,up:125
+//   125 MHz upconverter:   ...,14.074,up:125
+//   RTL-SDR Blog v4 on HF:  ...,7.074,ds:0      (v4 needs no direct sampling)
+//   fixed 30 dB gain:       ...,7.074,ds:0,gain:30
+//
+// options after the frequency (any order, comma-separated):
+//   up:MHz    upconverter local-oscillator frequency
+//   ds:N      direct sampling: 0=off, 1=I, 2=Q; default auto (Q for <24 MHz)
+//   gain:dB   fixed tuner gain in dB; default automatic gain
 //
 // ft8mon is a plain TCP client here; rtl_tcp does the USB device
 // handling. The DSP (a numerically-controlled oscillator to shift the
@@ -34,6 +40,8 @@ class RTLTCPSoundIn : public SoundIn {
   int dev_rate_;   // rtl_tcp sample rate, e.g. 240000 (a multiple of rate_)
   int offset_;     // hardware is tuned offset_ Hz below the dial frequency
   int upconverter_;// upconverter LO in Hz (0 if none); tuner sees dial + LO
+  int ds_;         // direct sampling: -1 auto, else 0 off / 1 I / 2 Q
+  int gain_;       // tuner gain in tenths of a dB; -1 = automatic gain
   int ppm_;        // frequency correction
   int fd_;         // TCP connection to rtl_tcp, or -1
   double time_;    // UNIX time of most recent audio sample
