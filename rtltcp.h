@@ -71,6 +71,7 @@ class RTLTCPSoundIn : public SoundIn {
   void start();
   std::vector<double> get(int n, double &t0, int latest);
   int rate() { return rate_; }
+  int dial_hz() { return hz_; }   // the FT8 dial (USB carrier) frequency
   int set_freq(int hz);
 };
 
