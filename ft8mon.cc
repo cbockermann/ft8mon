@@ -114,6 +114,12 @@ json_escape(const std::string &s)
 // be spliced in just before the closing brace.
 //
 static std::string json_tags;
+static bool json_has_band = false; // did the user set an explicit "band" tag?
+
+// dial (carrier) frequency in Hz, taken from an SDR backend that knows
+// it; -1 means unknown. when set, each JSON decode also carries
+// dial_hz, the absolute rf_hz (dial + audio offset), and a band tag.
+static int g_dial_hz = -1;
 
 //
 // parse a "key:value" argument from -tag and append it to json_tags.
@@ -133,7 +139,33 @@ json_add_tag(const char *kv)
     fprintf(stderr, "-tag: empty key in %s\n", kv);
     exit(1);
   }
+  if(k == "band")
+    json_has_band = true; // user's band tag wins over the auto one
   json_tags += ",\"" + json_escape(k) + "\":\"" + json_escape(v) + "\"";
+}
+
+//
+// map a dial frequency (Hz) to an amateur band name, or "" if unknown.
+//
+static const char *
+freq_to_band(int hz)
+{
+  double m = hz / 1e6;
+  if(m >= 1.8    && m <= 2.0)    return "160m";
+  if(m >= 3.5    && m <= 4.0)    return "80m";
+  if(m >= 5.25   && m <= 5.45)   return "60m";
+  if(m >= 7.0    && m <= 7.3)    return "40m";
+  if(m >= 10.1   && m <= 10.15)  return "30m";
+  if(m >= 14.0   && m <= 14.35)  return "20m";
+  if(m >= 18.068 && m <= 18.168) return "17m";
+  if(m >= 21.0   && m <= 21.45)  return "15m";
+  if(m >= 24.89  && m <= 24.99)  return "12m";
+  if(m >= 28.0   && m <= 29.7)   return "10m";
+  if(m >= 50.0   && m <= 54.0)   return "6m";
+  if(m >= 70.0   && m <= 70.5)   return "4m";
+  if(m >= 144.0  && m <= 148.0)  return "2m";
+  if(m >= 430.0  && m <= 440.0)  return "70cm";
+  return "";
 }
 
 //
@@ -185,6 +217,19 @@ hcb(int *a91, double hz0, double hz1, double off,
              ts, (long long) saved_cycle_start, (int) snr,
              off - 0.5, hz0, correct_bits, em.c_str());
     std::string out = buf;
+    // auto frequency tagging when the source knows its dial frequency.
+    if(g_dial_hz > 0){
+      long long rf = (long long) g_dial_hz + (long long)(hz0 + 0.5);
+      const char *band = freq_to_band(g_dial_hz);
+      char ab[128];
+      if(band[0] != 0 && !json_has_band){
+        snprintf(ab, sizeof(ab), ",\"dial_hz\":%d,\"rf_hz\":%lld,\"band\":\"%s\"",
+                 g_dial_hz, rf, band);
+      } else {
+        snprintf(ab, sizeof(ab), ",\"dial_hz\":%d,\"rf_hz\":%lld", g_dial_hz, rf);
+      }
+      out += ab;
+    }
     out += json_tags; // any -tag key/value pairs, or empty
     out += "}\n";
     // one send() == one datagram; atomic, so no lock needed even
@@ -224,6 +269,12 @@ decode_loop(SoundIn *sin)
 
   sin->start();
   int rate = sin->rate();
+
+  // if the source knows its dial frequency (SDR backends do), use it to
+  // tag each decode with the absolute frequency and band. an explicit
+  // -tag has already been parsed; a -tag band:... still takes priority.
+  if(g_dial_hz < 0)
+    g_dial_hz = sin->dial_hz();
 
   while(1){
     // sleep until 14 seconds into the next 15-second cycle.

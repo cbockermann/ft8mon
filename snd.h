@@ -39,6 +39,9 @@ public:
   }
   void levels();
   virtual int set_freq(int) { return -1; }
+  // dial (carrier) frequency in Hz, if this source knows it (SDR
+  // backends do); -1 means unknown (e.g. a sound card or a raw stream).
+  virtual int dial_hz() { return -1; }
   static SoundIn *open(std::string card, std::string chan, int rate);
 };
 
