@@ -332,8 +332,14 @@ main(int argc, char *argv[])
   } else if(argc >= 3 && strcmp(argv[1], "-file") == 0){
     for(int ii = 2; ii < argc; ii++){
       // the .wav file should start at an even 15-second boundary.
+      // "-" means read a WAV from stdin (e.g. ft8gen ... | ft8mon -file -).
       int rate;
-      std::vector<double> s = readwav(argv[ii], rate);
+      std::vector<double> s;
+      if(strcmp(argv[ii], "-") == 0){
+        s = readwav_stdin(rate);
+      } else {
+        s = readwav(argv[ii], rate);
+      }
       entry(s.data(), s.size(), 0.5 * rate, rate,
             150,
             3600, // 2900,

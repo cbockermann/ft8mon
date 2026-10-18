@@ -66,6 +66,79 @@ readwav(const char *filename, int &rate_out)
   return out;
 }
 
+//
+// read a WAV from stdin (for "ft8mon -file -").
+// parses the header itself so it works on a non-seekable pipe.
+// returns channel-0 samples as doubles; sets rate_out.
+//
+std::vector<double>
+readwav_stdin(int &rate_out)
+{
+  std::vector<unsigned char> buf;
+  unsigned char tmp[65536];
+  size_t n;
+  while((n = fread(tmp, 1, sizeof(tmp), stdin)) > 0)
+    buf.insert(buf.end(), tmp, tmp + n);
+
+  if(buf.size() < 44 ||
+     memcmp(buf.data(), "RIFF", 4) != 0 ||
+     memcmp(buf.data() + 8, "WAVE", 4) != 0){
+    fprintf(stderr, "readwav_stdin: stdin is not a WAV stream\n");
+    exit(1);
+  }
+
+  auto le16 = [&](size_t o){ return (unsigned)buf[o] | ((unsigned)buf[o+1] << 8); };
+  auto le32 = [&](size_t o){ return (unsigned)buf[o] | ((unsigned)buf[o+1] << 8) |
+                                    ((unsigned)buf[o+2] << 16) | ((unsigned)buf[o+3] << 24); };
+
+  int fmt = 1, ch = 1, bits = 16;
+  unsigned rate = 0;
+  size_t data_off = 0, data_len = 0;
+  int got_fmt = 0;
+
+  size_t pos = 12; // after "RIFF"<size>"WAVE"
+  while(pos + 8 <= buf.size()){
+    unsigned sz = le32(pos + 4);
+    size_t body = pos + 8;
+    if(memcmp(buf.data() + pos, "fmt ", 4) == 0 && body + 16 <= buf.size()){
+      fmt = le16(body + 0);
+      ch = le16(body + 2);
+      rate = le32(body + 4);
+      bits = le16(body + 14);
+      got_fmt = 1;
+    } else if(memcmp(buf.data() + pos, "data", 4) == 0){
+      data_off = body;
+      data_len = sz;
+      if(data_off + data_len > buf.size())
+        data_len = buf.size() - data_off; // tolerate a bogus/streamed size
+      break;
+    }
+    pos = body + sz + (sz & 1); // chunks are word-aligned
+  }
+
+  if(!got_fmt || data_off == 0){
+    fprintf(stderr, "readwav_stdin: missing fmt/data chunk\n");
+    exit(1);
+  }
+  rate_out = rate;
+
+  int bytes = bits / 8;
+  int frame = ch * bytes;
+  int nframes = frame ? (int)(data_len / frame) : 0;
+  std::vector<double> out(nframes);
+  for(int i = 0; i < nframes; i++){
+    const unsigned char *p = buf.data() + data_off + (size_t)i * frame; // channel 0
+    double v = 0;
+    if(fmt == 3 && bits == 32){ float f; memcpy(&f, p, 4); v = f; }
+    else if(bits == 8){ v = (((int)p[0]) - 128) / 128.0; }
+    else if(bits == 16){ short s = (short)(p[0] | (p[1] << 8)); v = s / 32768.0; }
+    else if(bits == 24){ int x = p[0] | (p[1] << 8) | (p[2] << 16); if(x & 0x800000) x |= ~0xffffff; v = x / 8388608.0; }
+    else if(bits == 32){ int x = p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned)p[3] << 24); v = x / 2147483648.0; }
+    out[i] = v;
+  }
+  return out;
+}
+
 void
 writetxt(std::vector<double> v, const char *filename)
 {
