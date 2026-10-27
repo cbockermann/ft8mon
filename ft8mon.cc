@@ -15,6 +15,7 @@
 #include <map>
 #include <string>
 #include <thread>
+#include <stdint.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <errno.h>
@@ -79,6 +80,148 @@ json_udp_open(const char *hostport)
 
   json_fd = fd;
   fprintf(stderr, "-json: sending decodes as JSON to %s\n", hostport);
+}
+
+//
+// optional WSJT-X UDP Message Protocol output (-wsjtx host:port).
+// emits Heartbeat (0), Status (1) and Decode (2) so GridTracker / JTAlert /
+// ft8web and other WSJT-X-aware tools can read ft8mon's decodes directly.
+// outbound only; RX-only (no Reply/Halt command side).
+//
+static int wsjtx_fd = -1;               // connected UDP socket, or -1
+static std::string wsjtx_id = "ft8mon"; // instance id, identical in every message
+#define WSJTX_VERSION "1.0"
+
+// big-endian / Qt-style serialisation into a byte buffer.
+static void w_u8(std::string &b, unsigned v){ b.push_back((char)(v & 0xff)); }
+static void w_u32(std::string &b, uint32_t v){
+  b.push_back((char)((v >> 24) & 0xff)); b.push_back((char)((v >> 16) & 0xff));
+  b.push_back((char)((v >> 8) & 0xff));  b.push_back((char)(v & 0xff));
+}
+static void w_u64(std::string &b, uint64_t v){
+  for(int i = 7; i >= 0; i--) b.push_back((char)((v >> (i*8)) & 0xff));
+}
+static void w_i32(std::string &b, int32_t v){ w_u32(b, (uint32_t) v); }
+static void w_bool(std::string &b, bool v){ b.push_back(v ? 1 : 0); }
+static void w_double(std::string &b, double d){ uint64_t u; memcpy(&u, &d, 8); w_u64(b, u); }
+// QString: 4-byte big-endian byte length, then UTF-8 bytes (empty => len 0).
+static void w_qstr(std::string &b, const std::string &s){
+  w_u32(b, (uint32_t) s.size());
+  b.append(s);
+}
+static void w_header(std::string &b, uint32_t type){
+  w_u32(b, 0xADBCCBDA); // magic
+  w_u32(b, 2);          // schema
+  w_u32(b, type);
+  w_qstr(b, wsjtx_id);
+}
+static void wsjtx_send(const std::string &b){
+  if(wsjtx_fd >= 0)
+    send(wsjtx_fd, b.data(), b.size(), 0);
+}
+
+static void
+wsjtx_heartbeat()
+{
+  std::string b;
+  w_header(b, 0);
+  w_u32(b, 3);              // maxSchema
+  w_qstr(b, WSJTX_VERSION); // version
+  w_qstr(b, "");            // revision
+  wsjtx_send(b);
+}
+
+static void
+wsjtx_status(long long dial_hz, bool decoding)
+{
+  std::string b;
+  w_header(b, 1);
+  w_u64(b, (uint64_t)(dial_hz > 0 ? dial_hz : 0)); // dialFrequency
+  w_qstr(b, "FT8");     // mode
+  w_qstr(b, "");        // dxCall
+  w_qstr(b, "");        // report
+  w_qstr(b, "FT8");     // txMode
+  w_bool(b, false);     // txEnabled
+  w_bool(b, false);     // transmitting
+  w_bool(b, decoding);  // decoding
+  w_u32(b, 1500);       // rxDF
+  w_u32(b, 1500);       // txDF
+  w_qstr(b, "");        // deCall
+  w_qstr(b, "");        // deGrid
+  w_qstr(b, "");        // dxGrid
+  w_bool(b, false);     // txWatchdog
+  w_qstr(b, "");        // subMode
+  w_bool(b, false);     // fastMode
+  w_u8(b, 0);           // specialOpMode
+  w_u32(b, 0xFFFFFFFF); // frequencyTolerance
+  w_u32(b, 15000);      // trPeriod (ms)
+  w_qstr(b, "ft8mon");  // configName
+  w_qstr(b, "");        // txMessage
+  wsjtx_send(b);
+}
+
+static void
+wsjtx_decode(uint32_t time_ms, int snr, double dt, uint32_t df,
+             const std::string &msg)
+{
+  std::string b;
+  w_header(b, 2);
+  w_bool(b, true);     // new
+  w_u32(b, time_ms);   // ms since 00:00:00 UTC of the decode period
+  w_i32(b, snr);
+  w_double(b, dt);
+  w_u32(b, df);        // audio offset in Hz
+  w_qstr(b, "~");      // mode (FT8 indicator)
+  w_qstr(b, msg);
+  w_bool(b, false);    // lowConfidence
+  w_bool(b, false);    // offAir
+  wsjtx_send(b);
+}
+
+//
+// open a connected UDP socket to host:port for WSJT-X output; a missing
+// host defaults to 127.0.0.1 and a missing port to 2237.
+//
+static void
+wsjtx_udp_open(const char *hostport)
+{
+  std::string hp(hostport);
+  std::string::size_type colon = hp.rfind(':');
+  std::string host, port;
+  if(colon == std::string::npos){
+    host = hp; port = "2237";
+  } else {
+    host = hp.substr(0, colon); port = hp.substr(colon + 1);
+  }
+  if(host.size() == 0) host = "127.0.0.1";
+  if(port.size() == 0) port = "2237";
+
+  struct addrinfo hints, *res = 0;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_DGRAM;
+  int e = getaddrinfo(host.c_str(), port.c_str(), &hints, &res);
+  if(e != 0 || res == 0){
+    fprintf(stderr, "-wsjtx: cannot resolve %s: %s\n", hostport, gai_strerror(e));
+    exit(1);
+  }
+  int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+  if(fd < 0){
+    fprintf(stderr, "-wsjtx: socket() failed: %s\n", strerror(errno));
+    exit(1);
+  }
+  if(connect(fd, res->ai_addr, res->ai_addrlen) < 0){
+    fprintf(stderr, "-wsjtx: connect(%s) failed: %s\n", hostport, strerror(errno));
+    exit(1);
+  }
+  freeaddrinfo(res);
+  wsjtx_fd = fd;
+  fprintf(stderr, "-wsjtx: sending WSJT-X UDP messages to %s:%s\n",
+          host.c_str(), port.c_str());
+
+  // announce ourselves right away.
+  wsjtx_heartbeat();
+  wsjtx_status(0, false);
 }
 
 //
@@ -237,6 +380,13 @@ hcb(int *a91, double hz0, double hz1, double off,
     send(json_fd, out.data(), out.size(), 0);
   }
 
+  if(wsjtx_fd >= 0){
+    // WSJT-X "time" is ms since 00:00:00 UTC of the decode period.
+    uint32_t tms = (uint32_t)(((long long) saved_cycle_start % 86400) * 1000);
+    uint32_t df = (uint32_t)(hz0 + 0.5); // audio offset (signal RF minus dial)
+    wsjtx_decode(tms, (int) snr, off - 0.5, df, msg);
+  }
+
   return 2; // 2 => new decode, do subtract.
 }
 
@@ -254,6 +404,7 @@ usage()
   fprintf(stderr, "       ft8mon -listen address:port rate     (raw s16le mono PCM)\n");
   fprintf(stderr, "  add  -json host:port to also send each decode as JSON over UDP\n");
   fprintf(stderr, "  add  -tag key:value  to add \"key\":\"value\" to each JSON object (repeatable)\n");
+  fprintf(stderr, "  add  -wsjtx host:port to also emit WSJT-X UDP messages (default 127.0.0.1:2237)\n");
   exit(1);
 }
 
@@ -317,11 +468,17 @@ decode_loop(SoundIn *sin)
         cycle_already.clear();
         cycle_mu.unlock();
 
+        // WSJT-X consumers: heartbeat (~15 s) + status (band context).
+        wsjtx_heartbeat();
+        wsjtx_status(g_dial_hz, true);
+
         entry(samples.data(), samples.size(), nominal_start, rate,
               150,
               3600, // 2900,
               hints, hints, budget, budget, hcb,
               0, (struct cdecode *) 0);
+
+        wsjtx_status(g_dial_hz, false);
       }
 
       sleep(2);
@@ -350,6 +507,9 @@ main(int argc, char *argv[])
     for(int r = 1; r < argc; ){
       if(strcmp(argv[r], "-json") == 0 && r + 1 < argc){
         json_udp_open(argv[r+1]);
+        r += 2;
+      } else if(strcmp(argv[r], "-wsjtx") == 0 && r + 1 < argc){
+        wsjtx_udp_open(argv[r+1]);
         r += 2;
       } else if(strcmp(argv[r], "-tag") == 0 && r + 1 < argc){
         json_add_tag(argv[r+1]);
