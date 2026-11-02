@@ -381,19 +381,41 @@ gfsk_r(const std::vector<int> &symbols,
     hzv[symsamples*(symbols.size()+1) + i] = hzv[symsamples*symbols.size() + i];
   }
   
-  // run the per-sample frequency vector through
-  // the gaussian filter.
+  // run the per-sample frequency vector through the gaussian filter.
+  //
+  // hzv is a sparse impulse train: only ~2 samples per symbol are non-zero
+  // (the spikes placed above), the rest is 0. The straightforward dense
+  // convolution (for every output sample, sum over every filter tap) therefore
+  // spends essentially all of its O(N * taps) work multiplying by zero. With
+  // the one-symbol-wide kernel this synthesis uses (gfsk_window(symsamples)),
+  // that is hundreds of millions of multiply-adds — ~11 s on a Pi Zero 2 W,
+  // far too slow to encode a transmission within a 15 s FT8 slot.
+  //
+  // Instead, scatter each non-zero impulse through the kernel into the output.
+  // The dense loop computes
+  //     o[i] = sum_j hzv[i-half+j] * gwin[j]
+  // so o[i] gets a term hzv[k]*gwin[j] whenever k = i-half+j; a single impulse
+  // at k thus contributes hzv[k]*gwin[j] to o[k+half-j] for each tap j.
+  // Iterating k in ascending order (and j ascending within each k) reproduces
+  // the dense loop's per-output accumulation order exactly, so the result is
+  // bit-for-bit identical — this only drops the multiply-by-zero terms.
+  // ~1000x fewer operations; the Pi encode falls from ~11 s to a few ms.
   int half = gwin.size() / 2;
-  std::vector<double> o(hzv.size());
-  for(int i = 0; i < (int) o.size(); i++){
-    double sum = 0;
-    for(int j = 0; j < (int) gwin.size(); j++){
-      int k = i - half + j;
-      if(k >= 0 && k < (int) hzv.size()){
-        sum += hzv[k] * gwin[j];
-      }
+  int gn = (int) gwin.size();
+  int on = (int) hzv.size();
+  std::vector<double> o(hzv.size(), 0.0);
+  for(int k = 0; k < on; k++){
+    double h = hzv[k];
+    if(h == 0.0)
+      continue;
+    // i = k + half - j must lie in [0, on); solve for the valid tap range.
+    int jlo = k + half - (on - 1);
+    if(jlo < 0) jlo = 0;
+    int jhi = k + half;
+    if(jhi > gn - 1) jhi = gn - 1;
+    for(int j = jlo; j <= jhi; j++){
+      o[k + half - j] += h * gwin[j];
     }
-    o[i] = sum;
   }
 
   // drop repeated first and last symbols
