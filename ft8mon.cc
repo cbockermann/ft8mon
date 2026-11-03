@@ -522,7 +522,13 @@ main(int argc, char *argv[])
   }
 
   if(argc == 4 && strcmp(argv[1], "-card") == 0){
-    int wanted_rate = 12000;
+    // -1 lets CardSoundIn pick a card-supported rate per platform: 48000 on
+    // Linux/ALSA (which has no implicit resampling, and USB codecs like the
+    // IC-7300 do not offer 12000), 12000 on macOS/CoreAudio (resampled for us).
+    // The decoder reduces whatever rate it is given (see reduce_rate in ft8.cc),
+    // so capturing at 48000 decodes correctly. Hard-coding 12000 here made the
+    // Linux open fail with "Invalid sample rate".
+    int wanted_rate = -1;
     SoundIn *sin = SoundIn::open(argv[2], argv[3], wanted_rate);
     decode_loop(sin);
   } else if(argc == 3 && strcmp(argv[1], "-listen") == 0){
