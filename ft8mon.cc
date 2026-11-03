@@ -537,7 +537,9 @@ main(int argc, char *argv[])
     SoundIn *sin = SoundIn::open("rawlisten", argv[2], atoi(argv[3]));
     decode_loop(sin);
   } else if(argc == 4 && strcmp(argv[1], "-levels") == 0){
-    SoundIn *sin = SoundIn::open(argv[2], argv[3], 12000);
+    // -1: card-supported rate per platform (see the -card note above); 12000
+    // failed to open on Linux/ALSA with USB codecs that lack a 12000 rate.
+    SoundIn *sin = SoundIn::open(argv[2], argv[3], -1);
     sin->start();
     sin->levels();
   } else if(argc >= 3 && strcmp(argv[1], "-file") == 0){
