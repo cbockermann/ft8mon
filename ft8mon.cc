@@ -402,6 +402,7 @@ usage()
   fprintf(stderr, "       ft8mon -file xxx.wav ...\n");
   fprintf(stderr, "       ft8mon -listen address:port          (WAV stream)\n");
   fprintf(stderr, "       ft8mon -listen address:port rate     (raw s16le mono PCM)\n");
+  fprintf(stderr, "       ft8mon -record dir card channel       (write one 12kHz WAV per slot)\n");
   fprintf(stderr, "  add  -json host:port to also send each decode as JSON over UDP\n");
   fprintf(stderr, "  add  -tag key:value  to add \"key\":\"value\" to each JSON object (repeatable)\n");
   fprintf(stderr, "  add  -wsjtx host:port to also emit WSJT-X UDP messages (default 127.0.0.1:2237)\n");
@@ -487,6 +488,81 @@ decode_loop(SoundIn *sin)
   }
 }
 
+// full-band resample a..brate without shifting the pass band, by FFT:
+// keep bins 0..brate/2 and inverse-transform. This is a brick-wall
+// anti-alias at the new Nyquist, which is what a file decoder (jt9)
+// wants — the whole 0..~3000 Hz FT8 pass band, un-shifted, at 12 kHz.
+// Absolute gain is irrelevant: the caller writes via writewav(), which
+// peak-normalises each file (a uniform scale preserves SNR).
+static std::vector<double>
+resample_fullband(const std::vector<double> &a, int arate, int brate)
+{
+  if(arate == brate || a.size() == 0)
+    return a;
+  int alen = a.size();
+  std::vector<std::complex<double>> bins = one_fft(a, 0, alen, "record_fft", 0);
+  int blen = (int) llround(alen * (brate / (double) arate));
+  std::vector<std::complex<double>> bbins(blen / 2 + 1);
+  for(int i = 0; i < (int) bbins.size() && i < (int) bins.size(); i++)
+    bbins[i] = bins[i]; // low band only, no frequency shift
+  return one_ifft(bbins, "record_ifft");
+}
+
+// record_loop captures slot-aligned audio and writes one WAV per 15-second
+// T/R period to dir, named YYMMDD_HHMMSS.wav (UTC slot start, the WSJT-X
+// convention jt9 parses the decode time from), 12000 Hz mono 16-bit. It does
+// no decoding itself — it is the capture half for file-based decoders and for
+// the offline benchmark harness. The slot timing mirrors decode_loop exactly.
+static void
+record_loop(SoundIn *sin, const char *dir)
+{
+  sin->start();
+  int rate = sin->rate();
+
+  while(1){
+    double tt = now();
+    long long cycle_start = tt - ((long long)tt % 15);
+
+    if(tt - cycle_start >= 14){
+      double ttt_start;
+      std::vector<double> samples = sin->get(15 * rate, ttt_start, 1);
+
+      double ttt_end = ttt_start + samples.size() / (double) rate;
+      cycle_start = ((long long) (ttt_end / 15)) * 15;
+
+      long long nominal_start = samples.size() - rate * (ttt_end - cycle_start - 0.5);
+
+      if(nominal_start >= 0 && nominal_start + 10*rate < (int) samples.size()){
+        // exactly 15 seconds, like decode_loop.
+        samples.resize(15 * rate, 0.0);
+
+        std::vector<double> out = resample_fullband(samples, rate, 12000);
+
+        struct tm result;
+        time_t tx = cycle_start;
+        gmtime_r(&tx, &result);
+        char path[1024], tmp[1040];
+        snprintf(path, sizeof path, "%s/%02d%02d%02d_%02d%02d%02d.wav",
+                 dir,
+                 result.tm_year % 100, result.tm_mon + 1, result.tm_mday,
+                 result.tm_hour, result.tm_min, result.tm_sec);
+        // write to a temp name and rename into place, so a consumer polling the
+        // directory (the jt9 wrapper) never reads a half-written file.
+        snprintf(tmp, sizeof tmp, "%s.tmp", path);
+        writewav(out, tmp, 12000);
+        rename(tmp, path);
+        printf("%02d:%02d:%02d recorded %s (%d samples @ 12000)\n",
+               result.tm_hour, result.tm_min, result.tm_sec,
+               path, (int) out.size());
+        fflush(stdout);
+      }
+
+      sleep(2);
+    }
+    usleep(100 * 1000); // 0.1 seconds
+  }
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -542,6 +618,12 @@ main(int argc, char *argv[])
     // argv[3] is the sample rate (e.g. 12000).
     SoundIn *sin = SoundIn::open("rawlisten", argv[2], atoi(argv[3]));
     decode_loop(sin);
+  } else if(argc == 5 && strcmp(argv[1], "-record") == 0){
+    // capture slot-aligned audio and write one 12 kHz WAV per 15 s period to
+    // the given directory (no decoding). argv[2]=dir, argv[3]=card, argv[4]=channel.
+    // Same card/channel/rate handling as -card; see record_loop above.
+    SoundIn *sin = SoundIn::open(argv[3], argv[4], -1);
+    record_loop(sin, argv[2]);
   } else if(argc == 4 && strcmp(argv[1], "-levels") == 0){
     SoundIn *sin = SoundIn::open(argv[2], argv[3], 12000);
     sin->start();
