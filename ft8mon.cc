@@ -428,6 +428,14 @@ decode_loop(SoundIn *sin)
   if(g_dial_hz < 0)
     g_dial_hz = sin->dial_hz();
 
+  // Exit if the capture device stops delivering audio (USB codec unplugged, or
+  // taken away by the OS / PipeWire): PortAudio does not report an error, get()
+  // simply returns nothing, and this loop would otherwise spin forever decoding
+  // silence. Several consecutive empty cycles mean the device is gone; exit so
+  // a supervisor can relaunch us and re-open it (it re-enumerates on a replug).
+  int stall = 0;
+  const int kMaxStallCycles = 4; // ~60 s of no usable audio = capture lost
+
   while(1){
     // sleep until 14 seconds into the next 15-second cycle.
     double tt = now();
@@ -450,6 +458,7 @@ decode_loop(SoundIn *sin)
       long long nominal_start = samples.size() - rate * (ttt_end - cycle_start - 0.5);
 
       if(nominal_start >= 0 && nominal_start + 10*rate < (int) samples.size()){
+        stall = 0; // fresh audio arrived this cycle
         struct tm result;
         time_t tx = cycle_start;
         gmtime_r(&tx, &result);
@@ -480,6 +489,10 @@ decode_loop(SoundIn *sin)
               0, (struct cdecode *) 0);
 
         wsjtx_status(g_dial_hz, false);
+      } else if(++stall >= kMaxStallCycles){
+        fprintf(stderr, "decode_loop: no usable audio for %d cycles; "
+                "capture device lost — exiting so the node can restart\n", stall);
+        exit(1);
       }
 
       sleep(2);
@@ -519,6 +532,13 @@ record_loop(SoundIn *sin, const char *dir)
   sin->start();
   int rate = sin->rate();
 
+  // Same capture-loss guard as decode_loop: if the device is removed at runtime
+  // PortAudio silently stops delivering audio and this loop would spin forever
+  // writing no WAVs. Count empty cycles and exit when capture is clearly dead so
+  // the supervisor can relaunch us and re-open the device after a replug.
+  int stall = 0;
+  const int kMaxStallCycles = 4; // ~60 s of no usable audio = capture lost
+
   while(1){
     double tt = now();
     long long cycle_start = tt - ((long long)tt % 15);
@@ -533,6 +553,7 @@ record_loop(SoundIn *sin, const char *dir)
       long long nominal_start = samples.size() - rate * (ttt_end - cycle_start - 0.5);
 
       if(nominal_start >= 0 && nominal_start + 10*rate < (int) samples.size()){
+        stall = 0; // fresh audio arrived this cycle
         // exactly 15 seconds, like decode_loop.
         samples.resize(15 * rate, 0.0);
 
@@ -555,6 +576,10 @@ record_loop(SoundIn *sin, const char *dir)
                result.tm_hour, result.tm_min, result.tm_sec,
                path, (int) out.size());
         fflush(stdout);
+      } else if(++stall >= kMaxStallCycles){
+        fprintf(stderr, "record_loop: no usable audio for %d cycles; "
+                "capture device lost — exiting so the node can restart\n", stall);
+        exit(1);
       }
 
       sleep(2);
