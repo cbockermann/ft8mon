@@ -450,12 +450,19 @@ decode_loop(SoundIn *sin)
       // most recent 15 seconds to be discarded.
       std::vector<double> samples = sin->get(15 * rate, ttt_start, 1);
 
-      // ttt_start is UNIX time of samples[0].
+      // ttt_start is UNIX time of samples[0]. Use the audio timeline ONLY to
+      // place the 0.5 s mark within the captured buffer (nominal_start): that
+      // position is the fractional offset into the slot, which is invariant to
+      // any error in the audio->UNIX conversion. The absolute slot LABEL below
+      // must NOT come from here — the conversion offset (dt_) is frozen at
+      // stream start, so an NTP step after start would otherwise poison every
+      // decode's time. We are >=14 s into cycle_start's T/R period (wall clock),
+      // so cycle_start is this slot's start; keep it for the label.
       double ttt_end = ttt_start + samples.size() / rate;
-      cycle_start = ((long long) (ttt_end / 15)) * 15;
+      long long audio_cycle = ((long long) (ttt_end / 15)) * 15;
 
       // sample # of 0.5 seconds into the 15-second cycle.
-      long long nominal_start = samples.size() - rate * (ttt_end - cycle_start - 0.5);
+      long long nominal_start = samples.size() - rate * (ttt_end - audio_cycle - 0.5);
 
       if(nominal_start >= 0 && nominal_start + 10*rate < (int) samples.size()){
         stall = 0; // fresh audio arrived this cycle
@@ -547,10 +554,16 @@ record_loop(SoundIn *sin, const char *dir)
       double ttt_start;
       std::vector<double> samples = sin->get(15 * rate, ttt_start, 1);
 
+      // The audio timeline places the 0.5 s mark within the buffer only; the
+      // WAV name (the slot label jt9 parses the decode time from) comes from the
+      // wall clock, not from here. See decode_loop: the audio->UNIX offset is
+      // frozen at stream start, so an NTP step after start would otherwise name
+      // every WAV with a stale time. cycle_start is this T/R period's start (we
+      // are >=14 s into it by wall clock); keep it for the name.
       double ttt_end = ttt_start + samples.size() / (double) rate;
-      cycle_start = ((long long) (ttt_end / 15)) * 15;
+      long long audio_cycle = ((long long) (ttt_end / 15)) * 15;
 
-      long long nominal_start = samples.size() - rate * (ttt_end - cycle_start - 0.5);
+      long long nominal_start = samples.size() - rate * (ttt_end - audio_cycle - 0.5);
 
       if(nominal_start >= 0 && nominal_start + 10*rate < (int) samples.size()){
         stall = 0; // fresh audio arrived this cycle
