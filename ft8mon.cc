@@ -565,20 +565,6 @@ record_loop(SoundIn *sin, const char *dir)
 
       long long nominal_start = samples.size() - rate * (ttt_end - audio_cycle - 0.5);
 
-      // Per-cycle capture diagnostics (stderr): how much audio actually arrived
-      // and where the slot's 0.5 s mark fell, so a stalled/short/misaligned
-      // capture is readable straight from the log instead of only surfacing as
-      // "no usable audio" after 4 cycles. into_slot = seconds of the last sample
-      // into its 15 s period (must exceed 10.5 to write); got = samples available.
-      fprintf(stderr, "record_loop: cycle got=%d/%d (%.2fs) ttt_start=%.3f "
-              "ttt_end=%.3f into_slot=%.2f nominal_start=%lld A(ns>=0)=%d "
-              "B(ns+%d<%d)=%d\n",
-              (int) samples.size(), 15 * rate, samples.size() / (double) rate,
-              ttt_start, ttt_end, ttt_end - (double) audio_cycle, nominal_start,
-              nominal_start >= 0, 10 * rate, (int) samples.size(),
-              nominal_start + 10 * rate < (int) samples.size());
-      fflush(stderr);
-
       if(nominal_start >= 0 && nominal_start + 10*rate < (int) samples.size()){
         stall = 0; // fresh audio arrived this cycle
         // exactly 15 seconds, like decode_loop.
@@ -603,10 +589,22 @@ record_loop(SoundIn *sin, const char *dir)
                result.tm_hour, result.tm_min, result.tm_sec,
                path, (int) out.size());
         fflush(stdout);
-      } else if(++stall >= kMaxStallCycles){
-        fprintf(stderr, "record_loop: no usable audio for %d cycles; "
-                "capture device lost — exiting so the node can restart\n", stall);
-        exit(1);
+      } else {
+        // Slot dropped: too little of this 15 s period was captured to make a
+        // WAV. The first slot after start is always short (the stream begins
+        // mid-period) and recovers on the next slot — that is normal. Repeated
+        // short slots mean the capture is starved. Log the reason each time so a
+        // stall is diagnosable, not silent until the exit below.
+        fprintf(stderr, "record_loop: slot dropped — only %.2fs of this period "
+                "captured (nominal_start=%lld) [stall %d/%d]\n",
+                samples.size() / (double) rate, nominal_start,
+                stall + 1, kMaxStallCycles);
+        fflush(stderr);
+        if(++stall >= kMaxStallCycles){
+          fprintf(stderr, "record_loop: no usable audio for %d cycles; "
+                  "capture device lost — exiting so the node can restart\n", stall);
+          exit(1);
+        }
       }
 
       sleep(2);
