@@ -589,10 +589,22 @@ record_loop(SoundIn *sin, const char *dir)
                result.tm_hour, result.tm_min, result.tm_sec,
                path, (int) out.size());
         fflush(stdout);
-      } else if(++stall >= kMaxStallCycles){
-        fprintf(stderr, "record_loop: no usable audio for %d cycles; "
-                "capture device lost — exiting so the node can restart\n", stall);
-        exit(1);
+      } else {
+        // Slot dropped: too little of this 15 s period was captured to make a
+        // WAV. The first slot after start is always short (the stream begins
+        // mid-period) and recovers on the next slot — that is normal. Repeated
+        // short slots mean the capture is starved. Log the reason each time so a
+        // stall is diagnosable, not silent until the exit below.
+        fprintf(stderr, "record_loop: slot dropped — only %.2fs of this period "
+                "captured (nominal_start=%lld) [stall %d/%d]\n",
+                samples.size() / (double) rate, nominal_start,
+                stall + 1, kMaxStallCycles);
+        fflush(stderr);
+        if(++stall >= kMaxStallCycles){
+          fprintf(stderr, "record_loop: no usable audio for %d cycles; "
+                  "capture device lost — exiting so the node can restart\n", stall);
+          exit(1);
+        }
       }
 
       sleep(2);

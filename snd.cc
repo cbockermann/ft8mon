@@ -306,9 +306,19 @@ CardSoundIn::start()
   ip.sampleFormat = paInt16;
   ip.hostApiSpecificStreamInfo = 0;
 
-  // don't set latency to zero; this causes problems on Linux.
-  ip.suggestedLatency = Pa_GetDeviceInfo(card_)->defaultLowInputLatency;
-  
+  // Capture-buffer latency. FT8 is processed in whole 15 s slots, so input
+  // latency is irrelevant to the decoder — but a small low-latency buffer on a
+  // direct-hw USB capture under a busy desktop (e.g. PipeWire on Linux)
+  // underruns constantly, and PortAudio's ALSA xrun recovery then fails in a
+  // loop (AlsaRestart -> snd_pcm_start), so no frames ever arrive and the loop
+  // reports "no usable audio". Ask for a large buffer instead: generous latency
+  // = far fewer wakeups = no xruns. (Zero still breaks Linux, as before.)
+  const PaDeviceInfo *di = Pa_GetDeviceInfo(card_);
+  double latency = di ? di->defaultHighInputLatency : 0.5;
+  if(latency < 0.3)
+    latency = 0.3; // floor: enough buffer to ride out desktop scheduling jitter
+  ip.suggestedLatency = latency;
+
   PaStream *str = 0;
   PaError err = Pa_OpenStream(&str,
                               &ip,
